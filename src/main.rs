@@ -7,7 +7,7 @@ use csv::Reader;
 use prql_compiler as prqlc;
 use rusqlite::{Connection, ToSql};
 
-/// A command-line tool to query CSV files using PRQL (PRQL Query Language)
+/// A command-line tool to query CSV and SQLite files using PRQL (PRQL Query Language)
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -17,13 +17,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run a PRQL query against CSV files
+    /// Run a PRQL query against CSV and SQLite files
     Query {
         /// PRQL query string or path to .prql file
         #[arg(required = true)]
         query: String,
 
-        /// CSV file paths (can specify multiple)
+        /// File paths (CSV or SQLite, can specify multiple)
         #[arg(required = true)]
         files: Vec<PathBuf>,
 
@@ -61,13 +61,31 @@ fn run_query(query: &str, files: &[PathBuf], format: &str) -> Result<(), Box<dyn
 
     for file in files {
         let table_name = file.file_stem().unwrap().to_string_lossy();
-        load_csv(&conn, &table_name, file)?;
+
+        if file
+            .extension()
+            .map(|e| e == "sqlite" || e == "db")
+            .unwrap_or(false)
+        {
+            conn.execute(
+                &format!("ATTACH DATABASE '{}' AS '{}'", file.display(), table_name),
+                [],
+            )?;
+        } else {
+            load_csv(&conn, &table_name, file)?;
+        }
     }
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((0..row.as_ref().column_count())
-            .map(|i| row.get_ref(i).unwrap().as_str().unwrap().to_string())
+            .map(|i| match row.get_ref(i).unwrap() {
+                rusqlite::types::ValueRef::Null => "NULL".to_string(),
+                rusqlite::types::ValueRef::Integer(i) => i.to_string(),
+                rusqlite::types::ValueRef::Real(f) => f.to_string(),
+                rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).to_string(),
+                rusqlite::types::ValueRef::Blob(_) => "[BLOB]".to_string(),
+            })
             .collect::<Vec<String>>())
     })?;
 
