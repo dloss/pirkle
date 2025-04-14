@@ -1,0 +1,18 @@
+[package]
+name = "prql-csv"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "A CLI tool to query CSV files using PRQL"
+readme = "README.md"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+prql-compiler = "0.9.5"  # Updated to the latest version
+rusqlite = "0.29.0"
+csv = "1.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
