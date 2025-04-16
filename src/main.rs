@@ -27,8 +27,8 @@ enum Commands {
         #[arg(required = true)]
         files: Vec<PathBuf>,
 
-        /// Output format (csv, table)
-        #[arg(short, long, default_value = "table")]
+        /// Output format (table, csv, json, logfmt)
+        #[arg(short, long, default_value = "table", value_parser = ["table", "csv", "jsonl", "logfmt"])]
         format: String,
     },
 
@@ -77,27 +77,69 @@ fn run_query(query: &str, files: &[PathBuf], format: &str) -> Result<(), Box<dyn
     }
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
-        Ok((0..row.as_ref().column_count())
-            .map(|i| match row.get_ref(i).unwrap() {
-                rusqlite::types::ValueRef::Null => "NULL".to_string(),
-                rusqlite::types::ValueRef::Integer(i) => i.to_string(),
-                rusqlite::types::ValueRef::Real(f) => f.to_string(),
-                rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).to_string(),
-                rusqlite::types::ValueRef::Blob(_) => "[BLOB]".to_string(),
-            })
-            .collect::<Vec<String>>())
-    })?;
 
-    for row in rows {
-        let row = row?;
-        if format == "csv" {
-            println!("{}", row.join(","));
-        } else {
-            println!("{:?}", row);
+    // Run query and immediately collect rows into a Vec to free up stmt
+    let collected_rows = stmt
+        .query_map([], |row| {
+            Ok((0..row.as_ref().column_count())
+                .map(|i| match row.get_ref(i).unwrap() {
+                    rusqlite::types::ValueRef::Null => None,
+                    rusqlite::types::ValueRef::Integer(i) => Some(i.to_string()),
+                    rusqlite::types::ValueRef::Real(f) => Some(f.to_string()),
+                    rusqlite::types::ValueRef::Text(t) => {
+                        Some(String::from_utf8_lossy(t).to_string())
+                    }
+                    rusqlite::types::ValueRef::Blob(_) => Some("[BLOB]".to_string()),
+                })
+                .collect::<Vec<Option<String>>>())
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+
+    // Output
+    for row in &collected_rows {
+        match format {
+            "csv" => {
+                let flat = row
+                    .iter()
+                    .map(|v| v.clone().unwrap_or_else(|| "NULL".into()))
+                    .collect::<Vec<_>>();
+                println!("{}", flat.join(","));
+            }
+            "jsonl" => {
+                let json_obj: serde_json::Value = column_names
+                    .iter()
+                    .zip(row.iter())
+                    .map(|(k, v)| {
+                        (
+                            k.to_string(),
+                            serde_json::Value::String(
+                                v.clone().unwrap_or_else(|| "null".into()),
+                            ),
+                        )
+                    })
+                    .collect::<serde_json::Map<_, _>>()
+                    .into();
+                println!("{}", serde_json::to_string(&json_obj)?);
+            }
+            "logfmt" => {
+                let mut line = String::new();
+                for (k, v) in column_names.iter().zip(row.iter()) {
+                    let val = v.clone().unwrap_or_else(|| "NULL".to_string());
+                    line.push_str(&format!("{}=\"{}\" ", k, val.replace('"', "\\\"")));
+                }
+                println!("{}", line.trim_end());
+            }
+            "table" => {
+                print_table(&column_names, &collected_rows);
+                break; // already printed whole table; don't reprint each row
+            }
+            _ => {
+                println!("{:?}", row);
+            }
         }
     }
-
     Ok(())
 }
 
@@ -113,6 +155,39 @@ fn compile_prql(query: &str) -> Result<String, Box<dyn Error>> {
         Ok(prqlc::compile(&prql, &prqlc::Options::default())?)
     } else {
         Ok(prqlc::compile(query, &prqlc::Options::default())?)
+    }
+}
+
+fn print_table(headers: &[String], rows: &[Vec<Option<String>>]) {
+    // Convert all values to strings and include headers
+    let mut table: Vec<Vec<String>> = vec![];
+    table.push(headers.to_vec()); // first row: headers
+    for row in rows {
+        table.push(
+            row.iter()
+                .map(|v| v.clone().unwrap_or_else(|| "NULL".into()))
+                .collect(),
+        );
+    }
+
+    // Compute max width per column
+    let col_widths = (0..headers.len())
+        .map(|col| table.iter().map(|row| row[col].len()).max().unwrap_or(0))
+        .collect::<Vec<_>>();
+
+    // Print the table
+    for (i, row) in table.iter().enumerate() {
+        for (j, cell) in row.iter().enumerate() {
+            print!("{:width$}  ", cell, width = col_widths[j]);
+        }
+        println!();
+        if i == 0 {
+            // separator after header
+            for width in &col_widths {
+                print!("{:-<width$}--", "", width = *width);
+            }
+            println!();
+        }
     }
 }
 
