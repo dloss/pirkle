@@ -1,14 +1,27 @@
 # Pirkle — Query CSV and SQLite with PRQL
 
-A tiny command-line tool to query CSV and SQLite files using [PRQL](https://prql-lang.org/).
+Pirkle is a command-line tool to query CSV and SQLite files using the [PRQL](https://prql-lang.org/) language.
 
-Pirkle loads CSV files into an in-memory SQLite database — so you can query them like regular tables, join them with SQLite databases, and output the results in table or CSV format.
+It loads CSV files into an in-memory SQLite database — allowing you to join them with other tables, apply filters, and export results in table or CSV format.
+
+---
+
+## Features
+
+- Query CSV files as structured tables
+- Join CSV and SQLite files together
+- Write expressive queries using PRQL
+- Output as a pretty table or CSV
+- Inspect the generated SQL
+- Lightweight, fast, and written in Rust
+
+> Note: While Pirkle does not depend on system libraries, it uses several Rust crates like `clap`, `prql-compiler`, `rusqlite`, and `serde`.
+
+---
 
 ## Installation
 
-First, install Rust from [rustup.rs](https://rustup.rs/).
-
-Then:
+Requires [Rust](https://rustup.rs/).
 
 ```bash
 git clone https://github.com/yourusername/pirkle.git
@@ -16,30 +29,32 @@ cd pirkle
 cargo install --path .
 ```
 
+---
+
 ## Usage
 
-### Query CSV and SQLite files with PRQL
+### Query CSV and SQLite files
 
 ```bash
 # Query a CSV file
 pirkle query "from employees | filter country == 'USA' | select {name, age}" ./employees.csv
 
-# Query a SQLite database file
+# Query a SQLite file
 pirkle query "from employees | select {name, age}" ./company.sqlite
 
-# Join across multiple CSV and SQLite files
+# Join CSV and SQLite
 pirkle query "from employees | join departments (==department_id) | select {employees.name, departments.department_name}" ./employees.csv ./company.sqlite
 ```
 
-> Note: CSV files are automatically loaded into in-memory SQLite tables based on their filename.
+CSV files are automatically loaded into in-memory SQLite tables, named after their filename (without the `.csv` extension).
 
 ---
 
 ### Output formats
 
-Default output is a simple table.
+Default is a readable table format.
 
-Use `--format csv` for CSV output:
+To output CSV:
 
 ```bash
 pirkle query --format csv "from employees | filter salary > 50000" ./employees.csv
@@ -47,66 +62,39 @@ pirkle query --format csv "from employees | filter salary > 50000" ./employees.c
 
 ---
 
-### Show the generated SQL (without running it)
+### Other options
 
-```bash
-pirkle show-sql "from employees | select {name, age} | sort age"
-```
+- Show generated SQL:
+  ```bash
+  pirkle show-sql "from employees | select {name, age} | sort age"
+  ```
 
----
-
-### Load a query from a `.prql` file
-
-Write your query into `query.prql`:
-
-```prql
-from employees
-filter salary > 50000
-select {name, position, salary}
-```
-
-Then run:
-
-```bash
-pirkle query query.prql ./employees.csv
-```
+- Load query from a `.prql` file:
+  ```bash
+  pirkle query --from query.prql ./employees.csv
+  ```
 
 ---
 
-## Examples
+## Example Data
 
-### Average age by department (CSV)
+Included example files:
 
-```bash
-pirkle query "from employees | group department (aggregate {avg_age = average age})" ./employees.csv
-```
+- `employees.csv`, `departments.csv`: Basic employee/department data
+- `company.sqlite`: Preloaded version of the same
+- `customers.csv`, `orders.csv`: Customer-order scenario
 
----
-
-### Top 5 highest paid employees (SQLite)
+### Sample Query
 
 ```bash
-pirkle query "from employees | sort -salary | take 5 | select {name, position, salary}" ./company.sqlite
+pirkle query "
+  from employees
+  | join departments (==department_id)
+  | filter salary > 60000
+  | sort salary
+  | select {employees.name, departments.department_name, salary}
+" ./employees.csv ./departments.csv
 ```
-
----
-
-### Revenue stats from multiple files (CSV + SQLite)
-
-```bash
-pirkle query "from orders | join customers (==customer_id) | group region (aggregate {total_revenue = sum amount, order_count = count this})" ./orders.csv ./customers.sqlite
-```
-
----
-
-## Features
-
-- Query CSV and SQLite files with PRQL
-- Auto-load CSV files into in-memory SQLite
-- Join across multiple files (CSV or SQLite)
-- Output as table or CSV
-- Show generated SQL for debugging
-- Lightweight — no dependencies beyond SQLite and PRQL compiler
 
 ---
 
