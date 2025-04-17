@@ -21,10 +21,12 @@ It loads CSV files into an in-memory SQLite database — allowing you to join th
 
 ## Installation
 
-Requires [Rust](https://rustup.rs/).
+Prebuilt binaries are available on the [Releases page](https://github.com/dloss/pirkle/releases).
+
+Or install using [Rust](https://rustup.rs/):
 
 ```bash
-git clone https://github.com/yourusername/pirkle.git
+git clone https://github.com/dloss/pirkle.git
 cd pirkle
 cargo install --path .
 ```
