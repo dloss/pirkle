@@ -1,0 +1,6 @@
+order_id,customer_id,amount,region
+1,100,250,North
+2,101,300,South
+3,100,150,North
+4,102,400,West
+5,103,200,East

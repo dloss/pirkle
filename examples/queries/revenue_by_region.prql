@@ -1,0 +1,3 @@
+from orders
+join customers (==customer_id)
+group customers.region (aggregate {total_revenue = sum orders.amount, order_count = count this})
