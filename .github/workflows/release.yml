@@ -12,6 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    environment: release
     strategy:
       matrix:
         include:
