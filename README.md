@@ -11,6 +11,7 @@ It loads CSV files into an in-memory SQLite database — allowing you to join th
 - Write expressive queries using PRQL
 - Output as a pretty table, CSV, JSON, or logfmt
 - Inspect the generated SQL
+- View schema information for files
 - Lightweight, fast, and written in Rust
 
 
@@ -48,7 +49,7 @@ cargo install --path .
 
 ```bash
 # Query a CSV file. CSV files are auto-loaded as SQLite tables.
-$ pirkle "from employees | filter country == 'USA' | select {name, age}" examples/employees.csv
+$ pirkle examples/employees.csv --query "from employees | filter country == 'USA' | select {name, age}"
 name            age  
 ---------------------
 John Smith      32   
@@ -58,10 +59,9 @@ James Brown     39
 
 ```bash
 # Query a SQLite file (after generating with examples/make_sqlite.sh)
-$ pirkle "from employees | select {name, age}" examples/company.sqlite
+$ pirkle examples/company.sqlite --query "from employees | select {name, age}"
 name     age  
 --------------
-name     age  
 Alice    30   
 Bob      45   
 Charlie  25   
@@ -70,8 +70,8 @@ Eva      28
 ```
 
 ```bash
-# Filter by department 
-$ pirkle "from employees | filter department == 'Engineering' | select {name, age}" examples/employees.csv
+# Alternative syntax using -- delimiter
+$ pirkle examples/employees.csv -- "from employees | filter department == 'Engineering' | select {name, age}"
 name            age  
 ---------------------
 John Smith      32   
@@ -80,13 +80,55 @@ Ahmed Hassan    29
 Sarah Kim       31   
 ```
 
+### Reading Queries from Standard Input
+
+You can pipe queries into Pirkle:
+
+```bash
+# Use a here-doc to provide a multi-line query
+$ pirkle examples/employees.csv << EOF
+from employees
+filter department == "Engineering"
+sort age
+select {name, age}
+EOF
+
+name            age  
+---------------------
+Ahmed Hassan    29   
+John Smith      32   
+Sarah Kim       31   
+Robert Johnson  41   
+```
+
+```bash
+# Or pipe a file containing a query
+$ cat query.prql | pirkle examples/employees.csv
+```
+
+### Viewing Schema Information
+
+To see the structure of your tables:
+
+```bash
+# View schemas with the --schema flag
+$ pirkle examples/employees.csv --schema
+Table: employees
+Columns:
+  id (TEXT)
+  name (TEXT)
+  department (TEXT)
+  age (TEXT)
+  salary (TEXT)
+  country (TEXT)
+```
 
 ### Show SQL without executing
 
 You can use the `--show-sql` flag to see the SQL that would be generated without executing the query:
 
 ```bash
-$ pirkle --show-sql "from employees | filter country == 'USA'" examples/employees.csv
+$ pirkle examples/employees.csv --query "from employees | filter country == 'USA'" --show-sql
 SELECT
   *
 FROM
@@ -99,7 +141,7 @@ WHERE
 This also works with PRQL files:
 
 ```bash
-$ pirkle --show-sql examples/queries/avg_age_by_department.prql examples/employees.csv
+$ pirkle examples/employees.csv --query examples/queries/avg_age_by_department.prql --show-sql
 SELECT
   department_id,
   AVG(age) AS avg_age
@@ -118,7 +160,7 @@ Default is a readable table format.
 To output CSV:
 
 ```bash
-$ pirkle --format csv "from employees | filter salary > 70000" examples/employees.csv
+$ pirkle examples/employees.csv --format csv --query "from employees | filter salary > 70000"
 1,John Smith,Engineering,32,85000,USA
 3,Robert Johnson,Engineering,41,92000,USA
 5,Ahmed Hassan,Engineering,29,75000,Egypt
@@ -131,7 +173,7 @@ Other supported formats:
 
 ```bash
 # JSON Lines format
-$ pirkle --format jsonl "from employees | filter country == 'USA'" examples/employees.csv
+$ pirkle examples/employees.csv --format jsonl --query "from employees | filter country == 'USA'"
 {"age":"32","country":"USA","department":"Engineering","id":"1","name":"John Smith","salary":"85000"}
 {"age":"41","country":"USA","department":"Engineering","id":"3","name":"Robert Johnson","salary":"92000"}
 {"age":"39","country":"USA","department":"Sales","id":"9","name":"James Brown","salary":"85000"}
@@ -139,7 +181,7 @@ $ pirkle --format jsonl "from employees | filter country == 'USA'" examples/empl
 
 ```bash
 # logfmt format
-$ pirkle --format logfmt "from employees | filter country == 'USA'" examples/employees.csv
+$ pirkle examples/employees.csv --format logfmt --query "from employees | filter country == 'USA'"
 id="1" name="John Smith" department="Engineering" age="32" salary="85000" country="USA"
 id="3" name="Robert Johnson" department="Engineering" age="41" salary="92000" country="USA"
 id="9" name="James Brown" department="Sales" age="39" salary="85000" country="USA"
@@ -148,32 +190,11 @@ id="9" name="James Brown" department="Sales" age="39" salary="85000" country="US
 
 ### Using PRQL files
 
-You can use prewritten PRQL query files. Some of the example files need to be corrected for the current PRQL version.
-
-Fix for `examples/queries/top_5_paid.prql`:
-```prql
-from employees
-sort -salary
-select {name, department, salary}
-take 5
-```
-
-Fix for `examples/queries/revenue_by_region.prql`:
-```prql
-from orders
-join customers (==customer_id)
-group region (
-  aggregate {
-    total_revenue = sum amount,
-    order_count = count this
-  }
-)
-```
-
-After fixing the PRQL files, you can run them directly:
+You can use prewritten PRQL query files:
 
 ```bash
-$ pirkle examples/queries/top_5_paid.prql examples/employees.csv
+# Use a PRQL file directly with --query
+$ pirkle examples/employees.csv --query examples/queries/top_5_paid.prql
 name                  department    salary
 ---------------------------------------
 Robert Johnson        Engineering   92000
@@ -184,32 +205,14 @@ Fatima Al-Farsi       Marketing     76000
 ```
 
 
-### Multi-line queries
-
-For complex queries, use quotes around the entire query. Note that pipe symbols (`|`) in multi-line format can cause syntax errors:
-
-```bash
-# This format works
-$ pirkle "from employees
-filter salary > 80000
-sort -salary
-select {name, department, salary}" examples/employees.csv
-name             department     salary
------------------------------------------
-Robert Johnson   Engineering    92000
-John Smith       Engineering    85000
-James Brown      Sales          85000
-Sarah Kim        Engineering    83000
-```
-
 ### Joining tables
 
 To join tables, use the join operation:
 
 ```bash
-$ pirkle "from orders
+$ pirkle examples/orders.csv examples/customers.csv --query "from orders
 join customers (==customer_id)
-select {orders.order_id, customers.name, orders.amount}" examples/orders.csv examples/customers.csv
+select {orders.order_id, customers.name, orders.amount}"
 order_id   name            amount
 -------------------------------
 1          Acme Corp       250
@@ -227,7 +230,7 @@ Included example files:
 - `examples/employees.csv`: Employee data with department, salary, and country information
 - `examples/departments.csv`: Department names and IDs
 - `examples/customers.csv`, `examples/orders.csv`: Customer-order relationship data
-- `examples/queries/*.prql`: Sample PRQL queries (Fixed versions provided in this README)
+- `examples/queries/*.prql`: Sample PRQL queries
 
 
 ## License
