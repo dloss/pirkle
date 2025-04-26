@@ -89,10 +89,10 @@ Pirkle supports reading CSV data from standard input, making it easy to pipe dat
 $ cat examples/employees.csv | pirkle stdin --query "from stdin | filter salary > 70000"
 
 # Use stdin with files
-$ cat orders.csv | pirkle stdin customers.csv --query "from stdin | join customers (==customer_id)"
+$ cat examples/orders.csv | pirkle stdin examples/customers.csv --query "from stdin | join customers (==customer_id)"
 
 # Custom table name for stdin data
-$ cat employees.csv | pirkle stdin:workers --query "from workers | sort -salary"
+$ cat examples/employees.csv | pirkle stdin:workers --query "from workers | sort {-salary}"
 ```
 
 ##### Key features:
@@ -106,7 +106,7 @@ $ cat employees.csv | pirkle stdin:workers --query "from workers | sort -salary"
   ```
 - **Multiple references**: Use the same stdin data with different table names
   ```bash
-  $ cat employees.csv | pirkle stdin:workers stdin:staff --query "from workers | join staff (==id)"
+  $ cat examples/employees.csv | pirkle stdin:workers stdin:staff --query "from workers | join staff (==id)"
   ```
 
 Pirkle intelligently determines how to use stdin based on your command arguments, making it a flexible tool for data pipelines.
