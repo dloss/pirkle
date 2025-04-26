@@ -80,6 +80,37 @@ Ahmed Hassan    29
 Sarah Kim       31   
 ```
 
+### Reading from Standard Input
+
+Pirkle supports reading CSV data from standard input, making it easy to pipe data from other commands:
+
+```bash
+# Pipe data into pirkle
+$ cat examples/employees.csv | pirkle stdin --query "from stdin | filter salary > 70000"
+
+# Use stdin with files
+$ cat orders.csv | pirkle stdin customers.csv --query "from stdin | join customers (==customer_id)"
+
+# Custom table name for stdin data
+$ cat employees.csv | pirkle stdin:workers --query "from workers | sort -salary"
+```
+
+##### Key features:
+
+- **Auto-detection**: Data on stdin is loaded as a table named "stdin"
+- **Explicit reference**: Use the filename `stdin` to read from stdin
+- **Custom naming**: Use `stdin:tablename` for custom table names
+- **Query from stdin**: If no query is provided with `--query` or `--`, Pirkle will read the query from stdin:
+  ```bash
+  $ echo "from employees | filter country == 'USA'" | pirkle examples/employees.csv
+  ```
+- **Multiple references**: Use the same stdin data with different table names
+  ```bash
+  $ cat employees.csv | pirkle stdin:workers stdin:staff --query "from workers | join staff (==id)"
+  ```
+
+Pirkle intelligently determines how to use stdin based on your command arguments, making it a flexible tool for data pipelines.
+
 
 ### Viewing Schema Information
 
