@@ -10,6 +10,7 @@ readme      = "README.md"
 keywords    = ["csv", "sqlite", "prql", "cli", "rust"]
 categories  = ["command-line-utilities", "database"]
 documentation = "https://docs.rs/pirkle"
+license-file = "LICENSE"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
