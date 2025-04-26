@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, BufRead};
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -12,8 +12,8 @@ use rusqlite::{Connection, ToSql};
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Files to query (CSV or SQLite)
-    #[arg(required = true)]
+    /// Files to query (CSV or SQLite), or 'stdin' to read from standard input
+    #[arg(required = false)]
     files: Vec<PathBuf>,
     
     /// PRQL query string (after --)
@@ -40,20 +40,20 @@ struct Cli {
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     
-    // Validate files exist
-    validate_files(&cli.files)?;
+    // Process file arguments to identify stdin markers
+    let (regular_files, stdin_tables) = process_file_arguments(&cli.files)?;
     
     // Check for explicit schema request
     if cli.schema {
-        return show_schemas(&cli.files);
+        return show_schemas(&regular_files, &stdin_tables);
     }
     
     // Determine the query source (prioritize --query over --)
     let query = cli.query
         .or(cli.query_after_delimiter)
         .or_else(|| {
-            // Check if we're reading from stdin and it's not a terminal
-            if atty::isnt(atty::Stream::Stdin) {
+            // Only use stdin for query if not being used for data and it's not a terminal
+            if stdin_tables.is_empty() && atty::isnt(atty::Stream::Stdin) {
                 let mut buffer = String::new();
                 if let Ok(_) = io::stdin().read_to_string(&mut buffer) {
                     Some(buffer)
@@ -65,27 +65,71 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         });
     
-    if let Some(query) = query {
-        // Run the query
-        run_query(&query, &cli.files, &cli.format, cli.show_sql)
-    } else {
-        // No query provided, no stdin input, and no schema flag
-        // For now: show schema by default
-        // In the future: this would launch interactive mode
-        show_schemas(&cli.files)
+    // If no query but files specified (including stdin markers), show schema
+    if query.is_none() && (!regular_files.is_empty() || !stdin_tables.is_empty()) {
+        return show_schemas(&regular_files, &stdin_tables);
     }
+    
+    // If no query and no files, show help
+    if query.is_none() {
+        eprintln!("Error: No query provided. Use --query, -- delimiter, or pipe a query.");
+        eprintln!("Run with --help for usage information.");
+        std::process::exit(1);
+    }
+    
+    // Run the query with both regular files and stdin tables
+    run_query(&query.unwrap(), &regular_files, &stdin_tables, &cli.format, cli.show_sql)
 }
 
-fn validate_files(files: &[PathBuf]) -> Result<(), Box<dyn Error>> {
-    for file in files {
-        if !file.exists() {
-            return Err(format!("File not found: {}", file.display()).into());
+// Function to process file arguments and identify stdin markers
+fn process_file_arguments(files: &[PathBuf]) -> Result<(Vec<PathBuf>, Vec<(String, String)>), Box<dyn Error>> {
+    let mut regular_files = Vec::new();
+    let mut stdin_tables = Vec::new();
+    
+    for file_arg in files {
+        let file_str = file_arg.to_string_lossy();
+        
+        if file_str == "stdin" {
+            // Plain "stdin" argument - use "stdin" as the table name
+            stdin_tables.push(("stdin".to_string(), "stdin".to_string()));
+        } else if let Some(custom_name) = file_str.strip_prefix("stdin:") {
+            if !custom_name.is_empty() {
+                // "stdin:custom" argument - use custom name as the table name
+                stdin_tables.push((custom_name.to_string(), "stdin".to_string()));
+            } else {
+                return Err("Invalid stdin table specification: empty name after 'stdin:'".into());
+            }
+        } else {
+            // Regular file - validate it exists
+            if !file_arg.exists() {
+                return Err(format!("File not found: {}", file_arg.display()).into());
+            }
+            regular_files.push(file_arg.clone());
         }
     }
-    Ok(())
+    
+    // If no stdin tables but also no files specified, and stdin is not a terminal,
+    // implicitly add a stdin table
+    if stdin_tables.is_empty() && regular_files.is_empty() && atty::isnt(atty::Stream::Stdin) {
+        // Check if there's data in stdin before assuming it's for data input
+        // We'll just peek at the first byte without consuming it
+        let stdin = io::stdin();
+        let mut handle = stdin.lock();
+        
+        // Try to peek if there's data
+        let mut peek_buf = [0; 1];
+        if handle.read_exact(&mut peek_buf).is_ok() {
+            // There's data, so add default stdin table
+            stdin_tables.push(("stdin".to_string(), "stdin".to_string()));
+        }
+        // Note: We've consumed a byte, but it'll be buffered and available for later reads
+    }
+    
+    Ok((regular_files, stdin_tables))
 }
 
-fn show_schemas(files: &[PathBuf]) -> Result<(), Box<dyn Error>> {
+fn show_schemas(files: &[PathBuf], stdin_tables: &[(String, String)]) -> Result<(), Box<dyn Error>> {
+    // First show schemas for regular files
     for file in files {
         let table_name = file.file_stem().unwrap().to_string_lossy();
         println!("Table: {}", table_name);
@@ -116,10 +160,56 @@ fn show_schemas(files: &[PathBuf]) -> Result<(), Box<dyn Error>> {
         println!();
     }
     
+    // Then show schemas for stdin tables if stdin has data
+    if !stdin_tables.is_empty() && atty::isnt(atty::Stream::Stdin) {
+        // Use BufReader to read just a few lines to determine headers
+        let stdin = io::stdin();
+        let mut buf_reader = io::BufReader::new(stdin.lock());
+        
+        let mut header_buffer = String::new();
+        if buf_reader.read_line(&mut header_buffer).is_ok() && !header_buffer.is_empty() {
+            // Read one more line to have enough data to infer types
+            let mut data_buffer = String::new();
+            let _ = buf_reader.read_line(&mut data_buffer);
+            
+            // Combine header and sample data
+            let sample = header_buffer + &data_buffer;
+            
+            // Parse the header
+            let mut reader = Reader::from_reader(sample.as_bytes());
+            if let Ok(headers) = reader.headers() {
+                // Show schema for each stdin table (they all share the same structure)
+                for (table_name, _) in stdin_tables {
+                    println!("Table: {}", table_name);
+                    println!("Columns:");
+                    for header in headers {
+                        println!("  {} (TEXT)", header);
+                    }
+                    println!();
+                }
+            } else {
+                println!("Warning: Could not parse headers from stdin");
+            }
+        } else {
+            println!("Warning: Could not read headers from stdin");
+        }
+        
+        println!("Note: Full stdin data will be processed when query is executed.");
+    } else if !stdin_tables.is_empty() {
+        // Stdin tables were specified but no data is available
+        println!("Warning: stdin tables specified, but no data available from stdin");
+    }
+    
     Ok(())
 }
 
-fn run_query(query: &str, files: &[PathBuf], format: &str, show_sql: bool) -> Result<(), Box<dyn Error>> {
+fn run_query(
+    query: &str, 
+    files: &[PathBuf], 
+    stdin_tables: &[(String, String)],
+    format: &str, 
+    show_sql: bool
+) -> Result<(), Box<dyn Error>> {
     let sql = compile_prql(query)?;
     
     if show_sql {
@@ -129,6 +219,7 @@ fn run_query(query: &str, files: &[PathBuf], format: &str, show_sql: bool) -> Re
 
     let conn = Connection::open_in_memory()?;
 
+    // Load regular files
     for file in files {
         let table_name = file.file_stem().unwrap().to_string_lossy();
 
@@ -142,10 +233,29 @@ fn run_query(query: &str, files: &[PathBuf], format: &str, show_sql: bool) -> Re
                 [],
             )?;
         } else {
-            load_csv(&conn, &table_name, file)?;
+            load_csv(&conn, &table_name.to_string(), file)?;
         }
     }
 
+    // Load stdin data if needed
+    if !stdin_tables.is_empty() && atty::isnt(atty::Stream::Stdin) {
+        // Read stdin data once into memory
+        let mut stdin_data = Vec::new();
+        io::stdin().read_to_end(&mut stdin_data)?;
+        
+        if stdin_data.is_empty() {
+            return Err("Stdin tables specified, but no data received from stdin".into());
+        }
+        
+        // Create each requested table from the same stdin data
+        for (table_name, _) in stdin_tables {
+            load_csv_from_memory(&conn, table_name, &stdin_data)?;
+        }
+    } else if !stdin_tables.is_empty() {
+        return Err("Stdin tables specified, but no data available from stdin".into());
+    }
+
+    // Execute the query and format results
     let mut stmt = conn.prepare(&sql)?;
 
     // Run query and immediately collect rows into a Vec to free up stmt
@@ -170,6 +280,9 @@ fn run_query(query: &str, files: &[PathBuf], format: &str, show_sql: bool) -> Re
     // Output
     match format {
         "csv" => {
+            // Print headers first
+            println!("{}", column_names.join(","));
+            
             for row in &collected_rows {
                 let flat = row
                     .iter()
@@ -210,6 +323,7 @@ fn run_query(query: &str, files: &[PathBuf], format: &str, show_sql: bool) -> Re
             print_table(&column_names, &collected_rows);
         }
     }
+    
     Ok(())
 }
 
@@ -262,6 +376,40 @@ fn print_table(headers: &[String], rows: &[Vec<Option<String>>]) {
 
 fn load_csv(conn: &Connection, table_name: &str, path: &PathBuf) -> Result<(), Box<dyn Error>> {
     let mut reader = Reader::from_path(path)?;
+    let headers = reader.headers()?.clone();
+
+    let columns = headers
+        .iter()
+        .map(|h| format!("'{}' TEXT", h))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    conn.execute(&format!("CREATE TABLE '{}' ({})", table_name, columns), [])?;
+
+    let mut stmt = conn.prepare(&format!(
+        "INSERT INTO '{}' VALUES ({})",
+        table_name,
+        vec!["?"; headers.len()].join(", ")
+    ))?;
+
+    for result in reader.records() {
+        let record = result?;
+        let params = record
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<String>>();
+
+        let params_refs = params.iter().map(|v| v as &dyn ToSql).collect::<Vec<_>>();
+
+        stmt.execute(&params_refs[..])?;
+    }
+
+    Ok(())
+}
+
+// Helper function to load CSV data directly from memory
+fn load_csv_from_memory(conn: &Connection, table_name: &str, data: &[u8]) -> Result<(), Box<dyn Error>> {
+    let mut reader = Reader::from_reader(data);
     let headers = reader.headers()?.clone();
 
     let columns = headers

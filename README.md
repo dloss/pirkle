@@ -80,31 +80,6 @@ Ahmed Hassan    29
 Sarah Kim       31   
 ```
 
-### Reading Queries from Standard Input
-
-You can pipe queries into Pirkle:
-
-```bash
-# Use a here-doc to provide a multi-line query
-$ pirkle examples/employees.csv << EOF
-from employees
-filter department == "Engineering"
-sort age
-select {name, age}
-EOF
-
-name            age  
----------------------
-Ahmed Hassan    29   
-John Smith      32   
-Sarah Kim       31   
-Robert Johnson  41   
-```
-
-```bash
-# Or pipe a file containing a query
-$ cat query.prql | pirkle examples/employees.csv
-```
 
 ### Viewing Schema Information
 
