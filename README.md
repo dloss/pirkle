@@ -1,7 +1,7 @@
 [![Releases](https://img.shields.io/github/v/release/dloss/pirkle)](https://github.com/dloss/pirkle/releases)
 [![crates.io](https://img.shields.io/crates/v/pirkle.svg)](https://crates.io/crates/pirkle)
 [![docs.rs](https://docs.rs/pirkle/badge.svg)](https://docs.rs/pirkle)
-[![CI](https://github.com/dloss/pirkle/actions/workflows/ci.yml/badge.svg)](https://github.com/dloss/pirkle/actions)
+[![CI](https://github.com/dloss/pirkle/actions/workflows/release.yml/badge.svg)](https://github.com/dloss/pirkle/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](/LICENSE)
 
 
