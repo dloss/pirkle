@@ -121,11 +121,11 @@ To see the structure of your tables:
 $ pirkle examples/employees.csv --schema
 Table: employees
 Columns:
-  id (TEXT)
+  id (INTEGER)
   name (TEXT)
   department (TEXT)
-  age (TEXT)
-  salary (TEXT)
+  age (INTEGER)
+  salary (INTEGER)
   country (TEXT)
 ```
 

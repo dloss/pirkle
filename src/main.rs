@@ -1,12 +1,12 @@
 use std::error::Error;
 use std::fs;
-use std::io::{self, BufRead, Read};
+use std::io::{self, Read};
 use std::path::PathBuf;
 
 use clap::Parser;
-use csv::Reader;
 use prql_compiler as prqlc;
 use rusqlite::{Connection, ToSql};
+use polars::prelude::*;
 
 /// A command-line tool to query CSV and SQLite files using PRQL (PRQL Query Language)
 #[derive(Parser)]
@@ -134,6 +134,23 @@ fn process_file_arguments(
     Ok((regular_files, stdin_tables))
 }
 
+// Function to convert Polars DataType to SQLite type string
+fn polars_to_sqlite_type(dtype: &DataType) -> &'static str {
+    match dtype {
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 |
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => "INTEGER",
+        DataType::Float32 | DataType::Float64 => "REAL",
+        DataType::Decimal(..) => "REAL",
+        DataType::Date | DataType::Datetime(..) => "TEXT", // Could use INTEGER for Unix timestamp
+        DataType::Time => "TEXT",
+        DataType::Boolean => "INTEGER", // SQLite has no Boolean, use INTEGER (0/1)
+        DataType::String => "TEXT",
+        DataType::List(_) => "TEXT", // Store lists as JSON text
+        DataType::Binary => "BLOB",
+        _ => "TEXT", // Default to TEXT for any other types
+    }
+}
+
 fn show_schemas(
     files: &[PathBuf],
     stdin_tables: &[(String, String)],
@@ -161,13 +178,16 @@ fn show_schemas(
                 println!("  {} ({})", name, type_);
             }
         } else {
-            // For CSV files, read headers
-            let mut reader = Reader::from_path(file)?;
-            let headers = reader.headers()?;
-
+            // For CSV files, use Polars to get schema with types
+            let df = CsvReader::from_path(file)?
+                .infer_schema(Some(100))
+                .has_header(true)
+                .finish()?;
+            
             println!("Columns:");
-            for header in headers {
-                println!("  {} (TEXT)", header);
+            for (name, dtype) in df.schema().iter() {
+                let type_str = polars_to_sqlite_type(dtype);
+                println!("  {} ({})", name, type_str);
             }
         }
         println!();
@@ -175,36 +195,29 @@ fn show_schemas(
 
     // Then show schemas for stdin tables if stdin has data
     if !stdin_tables.is_empty() && atty::isnt(atty::Stream::Stdin) {
-        // Use BufReader to read just a few lines to determine headers
-        let stdin = io::stdin();
-        let mut buf_reader = io::BufReader::new(stdin.lock());
-
-        let mut header_buffer = String::new();
-        if buf_reader.read_line(&mut header_buffer).is_ok() && !header_buffer.is_empty() {
-            // Read one more line to have enough data to infer types
-            let mut data_buffer = String::new();
-            let _ = buf_reader.read_line(&mut data_buffer);
-
-            // Combine header and sample data
-            let sample = header_buffer + &data_buffer;
-
-            // Parse the header
-            let mut reader = Reader::from_reader(sample.as_bytes());
-            if let Ok(headers) = reader.headers() {
-                // Show schema for each stdin table (they all share the same structure)
-                for (table_name, _) in stdin_tables {
-                    println!("Table: {}", table_name);
-                    println!("Columns:");
-                    for header in headers {
-                        println!("  {} (TEXT)", header);
-                    }
-                    println!();
+        // Read stdin data into a buffer
+        let mut buffer = Vec::new();
+        io::stdin().read_to_end(&mut buffer)?;
+        
+        if !buffer.is_empty() {
+            // Use Polars to infer schema from the buffer
+            let df = CsvReader::new(io::Cursor::new(&buffer))
+                .infer_schema(Some(100))
+                .has_header(true)
+                .finish()?;
+                
+            // Show schema for each stdin table (they all share the same structure)
+            for (table_name, _) in stdin_tables {
+                println!("Table: {}", table_name);
+                println!("Columns:");
+                for (name, dtype) in df.schema().iter() {
+                    let type_str = polars_to_sqlite_type(dtype);
+                    println!("  {} ({})", name, type_str);
                 }
-            } else {
-                println!("Warning: Could not parse headers from stdin");
+                println!();
             }
         } else {
-            println!("Warning: Could not read headers from stdin");
+            println!("Warning: Could not read data from stdin");
         }
 
         println!("Note: Full stdin data will be processed when query is executed.");
@@ -246,7 +259,7 @@ fn run_query(
                 [],
             )?;
         } else {
-            load_csv(&conn, &table_name.to_string(), file)?;
+            load_csv_with_polars(&conn, &table_name.to_string(), file)?;
         }
     }
 
@@ -262,7 +275,7 @@ fn run_query(
 
         // Create each requested table from the same stdin data
         for (table_name, _) in stdin_tables {
-            load_csv_from_memory(&conn, table_name, &stdin_data)?;
+            load_csv_from_memory_with_polars(&conn, table_name, &stdin_data)?;
         }
     } else if !stdin_tables.is_empty() {
         return Err("Stdin tables specified, but no data available from stdin".into());
@@ -304,7 +317,6 @@ fn run_query(
                 println!("{}", flat.join(","));
             }
         }
-        // Replace the JSONL format section in run_query function with this:
         "jsonl" => {
             for row in &collected_rows {
                 let json_obj: serde_json::Value = column_names
@@ -409,73 +421,129 @@ fn print_table(headers: &[String], rows: &[Vec<Option<String>>]) {
     }
 }
 
-fn load_csv(conn: &Connection, table_name: &str, path: &PathBuf) -> Result<(), Box<dyn Error>> {
-    let mut reader = Reader::from_path(path)?;
-    let headers = reader.headers()?.clone();
+// Helper function to safely convert Polars AnyValue to SQLite value
+fn convert_any_value_to_sql(value: AnyValue) -> Box<dyn ToSql> {
+    match value {
+        AnyValue::Null => Box::new(Option::<String>::None),
+        AnyValue::Int8(v) => Box::new(v as i64),
+        AnyValue::Int16(v) => Box::new(v as i64),
+        AnyValue::Int32(v) => Box::new(v as i64),
+        AnyValue::Int64(v) => Box::new(v),
+        AnyValue::UInt8(v) => Box::new(v as i64),
+        AnyValue::UInt16(v) => Box::new(v as i64),
+        AnyValue::UInt32(v) => Box::new(v as i64),
+        AnyValue::UInt64(v) => Box::new(v as i64),
+        AnyValue::Float32(v) => Box::new(v as f64),
+        AnyValue::Float64(v) => Box::new(v),
+        AnyValue::Boolean(v) => Box::new(if v { 1i64 } else { 0i64 }),
+        AnyValue::String(v) => Box::new(v.to_string()),
+        // Convert other types to strings
+        _ => Box::new(value.to_string()),
+    }
+}
 
-    let columns = headers
+// New function to load CSV using Polars with type inference
+fn load_csv_with_polars(conn: &Connection, table_name: &str, path: &PathBuf) -> Result<(), Box<dyn Error>> {
+    // Use Polars to read the CSV with type inference
+    let df = CsvReader::from_path(path)?
+        .infer_schema(Some(100))
+        .has_header(true)
+        .finish()?;
+    
+    // Create table with appropriate column types
+    let mut create_table_sql = format!("CREATE TABLE '{}' (", table_name);
+    let columns = df.schema()
         .iter()
-        .map(|h| format!("'{}' TEXT", h))
+        .map(|(name, dtype)| {
+            let sqlite_type = polars_to_sqlite_type(dtype);
+            format!("'{}' {}", name, sqlite_type)
+        })
         .collect::<Vec<_>>()
         .join(", ");
-
-    conn.execute(&format!("CREATE TABLE '{}' ({})", table_name, columns), [])?;
-
-    let mut stmt = conn.prepare(&format!(
-        "INSERT INTO '{}' VALUES ({})",
-        table_name,
-        vec!["?"; headers.len()].join(", ")
-    ))?;
-
-    for result in reader.records() {
-        let record = result?;
-        let params = record
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<String>>();
-
-        let params_refs = params.iter().map(|v| v as &dyn ToSql).collect::<Vec<_>>();
-
-        stmt.execute(&params_refs[..])?;
+    
+    create_table_sql.push_str(&columns);
+    create_table_sql.push_str(")");
+    
+    conn.execute(&create_table_sql, [])?;
+    
+    // Prepare placeholders for the insert statement
+    let placeholders = vec!["?"; df.width()].join(", ");
+    let insert_sql = format!("INSERT INTO '{}' VALUES ({})", table_name, placeholders);
+    
+    // Insert data row by row without using a prepared statement
+    for row_idx in 0..df.height() {
+        let mut params: Vec<Box<dyn ToSql>> = Vec::with_capacity(df.width());
+        
+        for col_idx in 0..df.width() {
+            let series = &df.get_columns()[col_idx];
+            let value = series.get(row_idx);
+            match value {
+                Ok(any_value) => params.push(convert_any_value_to_sql(any_value)),
+                Err(_) => params.push(Box::new(Option::<String>::None)),
+            }
+        }
+        
+        let param_refs: Vec<&dyn ToSql> = params.iter()
+            .map(|p| p.as_ref())
+            .collect();
+        
+        conn.execute(&insert_sql, &param_refs[..])?;
     }
-
+    
     Ok(())
 }
 
-// Helper function to load CSV data directly from memory
-fn load_csv_from_memory(
+// Updated function to load CSV from memory using Polars
+fn load_csv_from_memory_with_polars(
     conn: &Connection,
     table_name: &str,
     data: &[u8],
 ) -> Result<(), Box<dyn Error>> {
-    let mut reader = Reader::from_reader(data);
-    let headers = reader.headers()?.clone();
-
-    let columns = headers
+    // Use Polars to read the CSV with type inference
+    let df = CsvReader::new(io::Cursor::new(data))
+        .infer_schema(Some(100))
+        .has_header(true)
+        .finish()?;
+    
+    // Create table with appropriate column types
+    let mut create_table_sql = format!("CREATE TABLE '{}' (", table_name);
+    let columns = df.schema()
         .iter()
-        .map(|h| format!("'{}' TEXT", h))
+        .map(|(name, dtype)| {
+            let sqlite_type = polars_to_sqlite_type(dtype);
+            format!("'{}' {}", name, sqlite_type)
+        })
         .collect::<Vec<_>>()
         .join(", ");
-
-    conn.execute(&format!("CREATE TABLE '{}' ({})", table_name, columns), [])?;
-
-    let mut stmt = conn.prepare(&format!(
-        "INSERT INTO '{}' VALUES ({})",
-        table_name,
-        vec!["?"; headers.len()].join(", ")
-    ))?;
-
-    for result in reader.records() {
-        let record = result?;
-        let params = record
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<String>>();
-
-        let params_refs = params.iter().map(|v| v as &dyn ToSql).collect::<Vec<_>>();
-
-        stmt.execute(&params_refs[..])?;
+    
+    create_table_sql.push_str(&columns);
+    create_table_sql.push_str(")");
+    
+    conn.execute(&create_table_sql, [])?;
+    
+    // Prepare placeholders for the insert statement
+    let placeholders = vec!["?"; df.width()].join(", ");
+    let insert_sql = format!("INSERT INTO '{}' VALUES ({})", table_name, placeholders);
+    
+    // Insert data row by row
+    for row_idx in 0..df.height() {
+        let mut params: Vec<Box<dyn ToSql>> = Vec::with_capacity(df.width());
+        
+        for col_idx in 0..df.width() {
+            let series = &df.get_columns()[col_idx];
+            let value = series.get(row_idx);
+            match value {
+                Ok(any_value) => params.push(convert_any_value_to_sql(any_value)),
+                Err(_) => params.push(Box::new(Option::<String>::None)),
+            }
+        }
+        
+        let param_refs: Vec<&dyn ToSql> = params.iter()
+            .map(|p| p.as_ref())
+            .collect();
+        
+        conn.execute(&insert_sql, &param_refs[..])?;
     }
-
+    
     Ok(())
 }

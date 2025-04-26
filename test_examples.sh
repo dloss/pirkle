@@ -150,7 +150,7 @@ run_test "Output in CSV format" \
 # Output in JSON Lines format
 run_test "Output in JSON Lines format" \
     "$PIRKLE_BIN examples/employees.csv --format jsonl --query \"from employees | filter country == 'USA'\"" \
-    "{\"age\":\"32\",.*\"name\":\"John Smith\".*}"
+    "{\"age\":32,.*\"name\":\"John Smith\".*}"
 
 # Output in logfmt format
 run_test "Output in logfmt format" \
