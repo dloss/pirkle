@@ -180,9 +180,9 @@ Other supported formats:
 ```bash
 # JSON Lines format
 $ pirkle examples/employees.csv --format jsonl --query "from employees | filter country == 'USA'"
-{"age":"32","country":"USA","department":"Engineering","id":"1","name":"John Smith","salary":"85000"}
-{"age":"41","country":"USA","department":"Engineering","id":"3","name":"Robert Johnson","salary":"92000"}
-{"age":"39","country":"USA","department":"Sales","id":"9","name":"James Brown","salary":"85000"}
+{"age":32,"country":"USA","department":"Engineering","id":1,"name":"John Smith","salary":85000}
+{"age":41,"country":"USA","department":"Engineering","id":3,"name":"Robert Johnson","salary":92000}
+{"age":39,"country":"USA","department":"Sales","id":9,"name":"James Brown","salary":85000}
 ```
 
 ```bash
