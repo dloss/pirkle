@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use csv::Reader;
 use prql_compiler as prqlc;
 use rusqlite::{Connection, ToSql};
@@ -11,51 +11,35 @@ use rusqlite::{Connection, ToSql};
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
+    /// PRQL query string or path to .prql file
+    #[arg(required = true)]
+    query: String,
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Run a PRQL query against CSV and SQLite files
-    Query {
-        /// PRQL query string or path to .prql file
-        #[arg(required = true)]
-        query: String,
+    /// File paths (CSV or SQLite, can specify multiple)
+    #[arg(required = true)]
+    files: Vec<PathBuf>,
 
-        /// File paths (CSV or SQLite, can specify multiple)
-        #[arg(required = true)]
-        files: Vec<PathBuf>,
-
-        /// Output format (table, csv, json, logfmt)
-        #[arg(short, long, default_value = "table", value_parser = ["table", "csv", "jsonl", "logfmt"])]
-        format: String,
-    },
-
-    /// Show the resulting SQL without executing
-    ShowSql {
-        /// PRQL query string or path to .prql file
-        query: String,
-    },
+    /// Output format (table, csv, json, logfmt)
+    #[arg(short, long, default_value = "table", value_parser = ["table", "csv", "jsonl", "logfmt"])]
+    format: String,
+    
+    /// Show generated SQL without executing
+    #[arg(long)]
+    show_sql: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
-
-    match cli.command {
-        Commands::Query {
-            query,
-            files,
-            format,
-        } => run_query(&query, &files, &format)?,
-        Commands::ShowSql { query } => show_sql(&query)?,
-    }
-
-    Ok(())
+    run_query(&cli.query, &cli.files, &cli.format, cli.show_sql)
 }
 
-fn run_query(query: &str, files: &[PathBuf], format: &str) -> Result<(), Box<dyn Error>> {
+fn run_query(query: &str, files: &[PathBuf], format: &str, show_sql: bool) -> Result<(), Box<dyn Error>> {
     let sql = compile_prql(query)?;
+    
+    if show_sql {
+        println!("{}", sql);
+        return Ok(());
+    }
 
     let conn = Connection::open_in_memory()?;
 
@@ -140,12 +124,6 @@ fn run_query(query: &str, files: &[PathBuf], format: &str) -> Result<(), Box<dyn
             }
         }
     }
-    Ok(())
-}
-
-fn show_sql(query: &str) -> Result<(), Box<dyn Error>> {
-    let sql = compile_prql(query)?;
-    println!("{}", sql);
     Ok(())
 }
 
