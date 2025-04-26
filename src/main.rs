@@ -4,9 +4,9 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 
 use clap::Parser;
+use polars::prelude::*;
 use prql_compiler as prqlc;
 use rusqlite::{Connection, ToSql};
-use polars::prelude::*;
 
 /// A command-line tool to query CSV and SQLite files using PRQL (PRQL Query Language)
 #[derive(Parser)]
@@ -137,8 +137,14 @@ fn process_file_arguments(
 // Function to convert Polars DataType to SQLite type string
 fn polars_to_sqlite_type(dtype: &DataType) -> &'static str {
     match dtype {
-        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 |
-        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => "INTEGER",
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => "INTEGER",
         DataType::Float32 | DataType::Float64 => "REAL",
         DataType::Decimal(..) => "REAL",
         DataType::Date | DataType::Datetime(..) => "TEXT", // Could use INTEGER for Unix timestamp
@@ -157,33 +163,55 @@ fn show_schemas(
 ) -> Result<(), Box<dyn Error>> {
     // First show schemas for regular files
     for file in files {
-        let table_name = file.file_stem().unwrap().to_string_lossy();
-        println!("Table: {}", table_name);
 
         if file
             .extension()
             .map(|e| e == "sqlite" || e == "db")
             .unwrap_or(false)
         {
-            // For SQLite files, query schema information
+            // 1) Open the database
             let conn = Connection::open(file)?;
-            let mut stmt = conn.prepare("SELECT name, type FROM pragma_table_info(?)")?;
-            let columns = stmt.query_map([table_name.as_ref()], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
 
-            println!("Columns:");
-            for column in columns {
-                let (name, type_) = column?;
-                println!("  {} ({})", name, type_);
+            // 2) List all user tables
+            let mut tbl_stmt = conn.prepare(
+                "SELECT name
+                       FROM sqlite_master
+                      WHERE type='table'
+                        AND name NOT LIKE 'sqlite_%';",
+            )?;
+            let table_names = tbl_stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // 3) For each table, inline PRAGMA table_info
+            for table_name in table_names {
+                println!("Table: {}", table_name);
+
+                // PRAGMA cannot take parameters, so inline the table name
+                let pragma_sql = format!("PRAGMA table_info('{}')", table_name);
+                let mut col_stmt = conn.prepare(&pragma_sql)?;
+                let columns = col_stmt.query_map([], |row| {
+                    // row[1] = column name, row[2] = type
+                    Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                })?;
+
+                println!("Columns:");
+                for col in columns {
+                    let (name, typ) = col?;
+                    println!("  {} ({})", name, typ);
+                }
+                println!();
             }
         } else {
+            let table_name = file.file_stem().unwrap().to_string_lossy();
+            println!("Table: {}", table_name); 
+
             // For CSV files, use Polars to get schema with types
             let df = CsvReader::from_path(file)?
                 .infer_schema(Some(100))
                 .has_header(true)
                 .finish()?;
-            
+
             println!("Columns:");
             for (name, dtype) in df.schema().iter() {
                 let type_str = polars_to_sqlite_type(dtype);
@@ -198,14 +226,14 @@ fn show_schemas(
         // Read stdin data into a buffer
         let mut buffer = Vec::new();
         io::stdin().read_to_end(&mut buffer)?;
-        
+
         if !buffer.is_empty() {
             // Use Polars to infer schema from the buffer
             let df = CsvReader::new(io::Cursor::new(&buffer))
                 .infer_schema(Some(100))
                 .has_header(true)
                 .finish()?;
-                
+
             // Show schema for each stdin table (they all share the same structure)
             for (table_name, _) in stdin_tables {
                 println!("Table: {}", table_name);
@@ -443,16 +471,21 @@ fn convert_any_value_to_sql(value: AnyValue) -> Box<dyn ToSql> {
 }
 
 // New function to load CSV using Polars with type inference
-fn load_csv_with_polars(conn: &Connection, table_name: &str, path: &PathBuf) -> Result<(), Box<dyn Error>> {
+fn load_csv_with_polars(
+    conn: &Connection,
+    table_name: &str,
+    path: &PathBuf,
+) -> Result<(), Box<dyn Error>> {
     // Use Polars to read the CSV with type inference
     let df = CsvReader::from_path(path)?
         .infer_schema(Some(100))
         .has_header(true)
         .finish()?;
-    
+
     // Create table with appropriate column types
     let mut create_table_sql = format!("CREATE TABLE '{}' (", table_name);
-    let columns = df.schema()
+    let columns = df
+        .schema()
         .iter()
         .map(|(name, dtype)| {
             let sqlite_type = polars_to_sqlite_type(dtype);
@@ -460,20 +493,20 @@ fn load_csv_with_polars(conn: &Connection, table_name: &str, path: &PathBuf) -> 
         })
         .collect::<Vec<_>>()
         .join(", ");
-    
+
     create_table_sql.push_str(&columns);
     create_table_sql.push_str(")");
-    
+
     conn.execute(&create_table_sql, [])?;
-    
+
     // Prepare placeholders for the insert statement
     let placeholders = vec!["?"; df.width()].join(", ");
     let insert_sql = format!("INSERT INTO '{}' VALUES ({})", table_name, placeholders);
-    
+
     // Insert data row by row without using a prepared statement
     for row_idx in 0..df.height() {
         let mut params: Vec<Box<dyn ToSql>> = Vec::with_capacity(df.width());
-        
+
         for col_idx in 0..df.width() {
             let series = &df.get_columns()[col_idx];
             let value = series.get(row_idx);
@@ -482,14 +515,12 @@ fn load_csv_with_polars(conn: &Connection, table_name: &str, path: &PathBuf) -> 
                 Err(_) => params.push(Box::new(Option::<String>::None)),
             }
         }
-        
-        let param_refs: Vec<&dyn ToSql> = params.iter()
-            .map(|p| p.as_ref())
-            .collect();
-        
+
+        let param_refs: Vec<&dyn ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
         conn.execute(&insert_sql, &param_refs[..])?;
     }
-    
+
     Ok(())
 }
 
@@ -504,10 +535,11 @@ fn load_csv_from_memory_with_polars(
         .infer_schema(Some(100))
         .has_header(true)
         .finish()?;
-    
+
     // Create table with appropriate column types
     let mut create_table_sql = format!("CREATE TABLE '{}' (", table_name);
-    let columns = df.schema()
+    let columns = df
+        .schema()
         .iter()
         .map(|(name, dtype)| {
             let sqlite_type = polars_to_sqlite_type(dtype);
@@ -515,20 +547,20 @@ fn load_csv_from_memory_with_polars(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    
+
     create_table_sql.push_str(&columns);
     create_table_sql.push_str(")");
-    
+
     conn.execute(&create_table_sql, [])?;
-    
+
     // Prepare placeholders for the insert statement
     let placeholders = vec!["?"; df.width()].join(", ");
     let insert_sql = format!("INSERT INTO '{}' VALUES ({})", table_name, placeholders);
-    
+
     // Insert data row by row
     for row_idx in 0..df.height() {
         let mut params: Vec<Box<dyn ToSql>> = Vec::with_capacity(df.width());
-        
+
         for col_idx in 0..df.width() {
             let series = &df.get_columns()[col_idx];
             let value = series.get(row_idx);
@@ -537,13 +569,11 @@ fn load_csv_from_memory_with_polars(
                 Err(_) => params.push(Box::new(Option::<String>::None)),
             }
         }
-        
-        let param_refs: Vec<&dyn ToSql> = params.iter()
-            .map(|p| p.as_ref())
-            .collect();
-        
+
+        let param_refs: Vec<&dyn ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
         conn.execute(&insert_sql, &param_refs[..])?;
     }
-    
+
     Ok(())
 }
