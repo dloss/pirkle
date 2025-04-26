@@ -4,7 +4,12 @@ version = "0.4.2"
 edition = "2021"
 authors = ["Dirk Loss <mail@dirk-loss.de>"]
 description = "A CLI tool to query files using PRQL"
-readme = "README.md"
+repository  = "https://github.com/dloss/pirkle"
+homepage    = "https://github.com/dloss/pirkle"
+readme      = "README.md"
+keywords    = ["csv", "sqlite", "prql", "cli", "rust"]
+categories  = ["command-line-utilities", "database"]
+documentation = "https://docs.rs/pirkle"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
