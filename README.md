@@ -4,8 +4,6 @@ Pirkle is a command-line tool to query CSV and SQLite files using the [PRQL](htt
 
 It loads CSV files into an in-memory SQLite database — allowing you to join them with other tables, apply filters, and export results in table or CSV format.
 
----
-
 ## Features
 
 - Query CSV files as structured tables
@@ -15,9 +13,6 @@ It loads CSV files into an in-memory SQLite database — allowing you to join th
 - Inspect the generated SQL
 - Lightweight, fast, and written in Rust
 
-> Note: While Pirkle does not depend on system libraries, it uses several Rust crates like `clap`, `prql-compiler`, `rusqlite`, and `serde`.
-
----
 
 ## Installation
 
@@ -45,7 +40,6 @@ cd pirkle
 cargo install --path .
 ```
 
----
 
 ## Usage
 
@@ -64,7 +58,6 @@ pirkle query "from employees | join departments (==department_id) | select {empl
 
 CSV files are automatically loaded into in-memory SQLite tables, named after their filename (without the `.csv` extension).
 
----
 
 ### Output formats
 
@@ -76,7 +69,6 @@ To output CSV:
 pirkle query --format csv "from employees | filter salary > 50000" ./employees.csv
 ```
 
----
 
 ### Other options
 
@@ -90,7 +82,6 @@ pirkle query --format csv "from employees | filter salary > 50000" ./employees.c
   pirkle query --from query.prql ./employees.csv
   ```
 
----
 
 ## Example Data
 
@@ -112,7 +103,6 @@ pirkle query "
 " ./employees.csv ./departments.csv
 ```
 
----
 
 ## License
 
