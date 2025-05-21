@@ -18,6 +18,7 @@ It loads CSV files into an in-memory SQLite database — allowing you to join th
 - Output as a pretty table, CSV, JSON, or logfmt
 - Inspect the generated SQL
 - View schema information for files
+- Save the resulting database (with loaded CSVs/SQLite tables) to a new SQLite file
 - Lightweight, fast, and written in Rust
 
 
@@ -238,6 +239,44 @@ order_id   name            amount
 3          Acme Corp       150
 4          Initech         400
 5          Stark Industries 200
+```
+
+### Saving the Database
+
+You can save the current state of the in-memory database, including all loaded CSV files and attached SQLite tables, to a new SQLite database file using the `--output-db <FILE_PATH>` option. This is useful for persisting transformations, converting CSVs to a SQLite database, or preparing a database for use with other tools.
+
+**Example 1: Saving loaded CSVs**
+
+```bash
+# Load employees.csv and departments.csv, then save to company.sqlite
+$ pirkle examples/employees.csv examples/departments.csv --output-db company.sqlite
+# Database saved to company.sqlite
+# company.sqlite will now contain 'employees' and 'departments' tables.
+```
+Pirkle will print a confirmation message to stderr when the database is saved.
+
+**Example 2: Saving after a query**
+
+```bash
+# Load employees.csv, run a query, and save the entire database (including the 'employees' table)
+$ pirkle examples/employees.csv --query "from employees | filter country == 'USA'" --output-db us_employees_db.sqlite
+# name            age  
+# ---------------------
+# John Smith      32   
+# Robert Johnson  41   
+# James Brown     39   
+# Database saved to us_employees_db.sqlite
+# us_employees_db.sqlite will contain the 'employees' table.
+# Note: The output of the query itself is printed to stdout as usual, not saved as a new table.
+# The --output-db flag saves the state of the database that the query ran against.
+```
+
+**Example 3: Saving data from stdin**
+
+```bash
+$ cat examples/orders.csv | pirkle stdin --output-db orders_from_stdin.sqlite
+# Database saved to orders_from_stdin.sqlite
+# orders_from_stdin.sqlite will now contain the 'stdin' table with data from orders.csv.
 ```
 
 

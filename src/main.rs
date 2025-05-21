@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use polars::prelude::*;
 use prql_compiler as prqlc;
-use rusqlite::{Connection, ToSql};
+use rusqlite::{backup, Connection, ToSql};
 
 /// A command-line tool to query CSV and SQLite files using PRQL (PRQL Query Language)
 #[derive(Parser)]
@@ -35,25 +35,47 @@ struct Cli {
     /// Show generated SQL without executing
     #[arg(long)]
     show_sql: bool,
+
+    /// Optional file path to save the SQLite database
+    #[arg(long, value_name = "FILE_PATH")]
+    output_db: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
+    let conn = Connection::open_in_memory()?;
 
-    // Process file arguments to identify stdin markers
     let (regular_files, stdin_tables) = process_file_arguments(&cli.files)?;
 
-    // Check for explicit schema request
-    if cli.schema {
-        return show_schemas(&regular_files, &stdin_tables);
+    // Attempt to load data.
+    if let Err(e) = load_all_data(&conn, &regular_files, &stdin_tables) {
+        // If loading fails, and we are not trying to save an (empty) DB, it's an error.
+        // If --output-db was specified with no inputs, it's okay to proceed to save empty DB.
+        if cli.output_db.is_none() || !regular_files.is_empty() || !stdin_tables.is_empty() {
+            // Only return error if it's not the "save empty DB" case.
+            return Err(format!("Failed to load data: {}", e).into());
+        }
+        // Warn if proceeding to save an empty DB after a load error with inputs.
+        if !regular_files.is_empty() || !stdin_tables.is_empty() {
+             eprintln!("Warning: Failed to load data: {}. Proceeding to save the database as requested.", e);
+        }
     }
 
-    // Determine the query source (prioritize --query over --)
-    let query = cli.query.or(cli.query_after_delimiter).or_else(|| {
-        // Only use stdin for query if not being used for data and it's not a terminal
+    let mut action_taken = false;
+
+    if cli.schema {
+        // Pass regular_files and stdin_tables for context to show_schemas
+        show_schemas(&conn, &regular_files, &stdin_tables)?;
+        action_taken = true;
+    }
+
+    // Determine the query source
+    let mut query_from_stdin_attempted = false;
+    let query_opt = cli.query.or(cli.query_after_delimiter).or_else(|| {
         if stdin_tables.is_empty() && atty::isnt(atty::Stream::Stdin) {
+            query_from_stdin_attempted = true;
             let mut buffer = String::new();
-            if let Ok(_) = io::stdin().read_to_string(&mut buffer) {
+            if io::stdin().read_to_string(&mut buffer).is_ok() && !buffer.trim().is_empty() {
                 Some(buffer)
             } else {
                 None
@@ -63,26 +85,61 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    // If no query but files specified (including stdin markers), show schema
-    if query.is_none() && (!regular_files.is_empty() || !stdin_tables.is_empty()) {
-        return show_schemas(&regular_files, &stdin_tables);
+    if let Some(query_str) = query_opt {
+        if !query_str.trim().is_empty() {
+            run_query(&conn, &query_str, &cli.format, cli.show_sql)?;
+            action_taken = true;
+        } else {
+            // Handle empty query string case
+            let is_saving_db = cli.output_db.is_some();
+            let is_showing_schema = cli.schema;
+            if !is_saving_db && !is_showing_schema { // Only error if no other action is pending
+                if query_from_stdin_attempted {
+                    eprintln!("Error: Received empty query from stdin.");
+                } else {
+                    eprintln!("Error: Empty query provided via command line argument.");
+                }
+                std::process::exit(1);
+            } else if query_from_stdin_attempted { // Warn if empty query from stdin but other actions are pending
+                eprintln!("Warning: Received empty query from stdin. Other actions (schema/output) will proceed.");
+            } else { // Warn if empty query from args but other actions are pending
+                 eprintln!("Warning: Empty query provided via command line argument. Other actions (schema/output) will proceed.");
+            }
+        }
     }
 
-    // If no query and no files, show help
-    if query.is_none() {
-        eprintln!("Error: No query provided. Use --query, -- delimiter, or pipe a query.");
-        eprintln!("Run with --help for usage information.");
-        std::process::exit(1);
+    if let Some(ref output_db_path) = cli.output_db {
+        save_database(&conn, output_db_path)?;
+        action_taken = true; // save_database already prints a success message
     }
 
-    // Run the query with both regular files and stdin tables
-    run_query(
-        &query.unwrap(),
-        &regular_files,
-        &stdin_tables,
-        &cli.format,
-        cli.show_sql,
-    )
+    // Default action: if files were given (or stdin data expected) but no specific action
+    // (query, schema flag, output_db) was taken, then show schema.
+    if !action_taken && (!regular_files.is_empty() || !stdin_tables.is_empty()) {
+        show_schemas(&conn, &regular_files, &stdin_tables)?;
+        action_taken = true;
+    }
+
+    if !action_taken {
+        // If execution reaches here and no arguments were initially passed (other than program name),
+        // clap would typically show help. If args were passed but led to no action, it's an error.
+        if std::env::args().len() > 1 || query_from_stdin_attempted {
+            eprintln!("Error: No action performed. Specify a query, --schema, --output-db, or provide input files to see their schema by default.");
+            eprintln!("Run with --help for usage information.");
+            std::process::exit(1);
+        } else {
+            // This case implies the program was run with no arguments.
+            // Let clap show the help message.
+            // To explicitly show help:
+            // Cli::command().print_help()?;
+            // std::process::exit(0); // Or 1, depending on desired behavior for empty invocation
+            // However, clap usually handles this automatically if `Cli::parse()` is called.
+            // If not, and this state is reachable, it indicates a logic gap.
+            // For now, assume clap handles it or a more specific error above should catch it.
+        }
+    }
+
+    Ok(())
 }
 
 // Function to process file arguments and identify stdin markers
@@ -158,109 +215,105 @@ fn polars_to_sqlite_type(dtype: &DataType) -> &'static str {
 }
 
 fn show_schemas(
-    files: &[PathBuf],
-    stdin_tables: &[(String, String)],
+    conn: &Connection,
+    files: &[PathBuf], 
+    stdin_tables: &[(String, String)], 
 ) -> Result<(), Box<dyn Error>> {
-    // First show schemas for regular files
-    for file in files {
+    let mut tables_shown = false;
+    // List all user tables from the connection
+    let mut tbl_stmt = conn.prepare(
+        "SELECT name
+               FROM sqlite_master
+              WHERE type='table'
+                AND name NOT LIKE 'sqlite_%'
+           ORDER BY name;", // Added ordering for consistency
+    )?;
+    let table_names = tbl_stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
 
-        if file
-            .extension()
-            .map(|e| e == "sqlite" || e == "db")
-            .unwrap_or(false)
-        {
-            // 1) Open the database
-            let conn = Connection::open(file)?;
+    if table_names.is_empty() {
+        println!("No tables found in the database.");
+        return Ok(());
+    }
 
-            // 2) List all user tables
-            let mut tbl_stmt = conn.prepare(
-                "SELECT name
-                       FROM sqlite_master
-                      WHERE type='table'
-                        AND name NOT LIKE 'sqlite_%';",
-            )?;
-            let table_names = tbl_stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
+    // For each table, use PRAGMA table_info from the connection
+    for table_name in table_names {
+        println!("Table: {}", table_name);
 
-            // 3) For each table, inline PRAGMA table_info
-            for table_name in table_names {
-                println!("Table: {}", table_name);
+        let pragma_sql = format!("PRAGMA table_info('{}')", table_name.replace("'", "''")); // Sanitize table name for SQL
+        let mut col_stmt = conn.prepare(&pragma_sql)?;
+        let columns = col_stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?, // Column name
+                row.get::<_, String>(2)?, // Column type
+            ))
+        })?;
 
-                // PRAGMA cannot take parameters, so inline the table name
-                let pragma_sql = format!("PRAGMA table_info('{}')", table_name);
-                let mut col_stmt = conn.prepare(&pragma_sql)?;
-                let columns = col_stmt.query_map([], |row| {
-                    // row[1] = column name, row[2] = type
-                    Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
-                })?;
-
-                println!("Columns:");
-                for col in columns {
-                    let (name, typ) = col?;
+        println!("Columns:");
+        let mut found_columns = false;
+        for col_result in columns {
+            match col_result {
+                Ok((name, typ)) => {
                     println!("  {} ({})", name, typ);
+                    found_columns = true;
                 }
-                println!();
+                Err(e) => {
+                    eprintln!("Error reading schema for column in table {}: {}", table_name, e);
+                }
             }
-        } else {
-            let table_name = file.file_stem().unwrap().to_string_lossy();
-            println!("Table: {}", table_name); 
-
-            // For CSV files, use Polars to get schema with types
-            let df = CsvReader::from_path(file)?
-                .infer_schema(Some(100))
-                .has_header(true)
-                .finish()?;
-
-            println!("Columns:");
-            for (name, dtype) in df.schema().iter() {
-                let type_str = polars_to_sqlite_type(dtype);
-                println!("  {} ({})", name, type_str);
-            }
+        }
+        if !found_columns {
+            println!("  (No columns found or error reading columns)");
         }
         println!();
     }
 
-    // Then show schemas for stdin tables if stdin has data
-    if !stdin_tables.is_empty() && atty::isnt(atty::Stream::Stdin) {
-        // Read stdin data into a buffer
-        let mut buffer = Vec::new();
-        io::stdin().read_to_end(&mut buffer)?;
+    // Note: The original function had logic for reading schemas directly from CSV files
+    // and for stdin if not yet loaded. If `load_all_data` preloads everything,
+    // this simplified version focusing on `conn` should be sufficient.
+    // If there's a need to show schema for files *not* loaded into the DB (e.g., before deciding to load),
+    // that would require keeping some of the old logic and passing `files` and `stdin_tables`.
+    // For this refactoring, we assume `load_all_data` has populated `conn`.
 
-        if !buffer.is_empty() {
-            // Use Polars to infer schema from the buffer
-            let df = CsvReader::new(io::Cursor::new(&buffer))
-                .infer_schema(Some(100))
-                .has_header(true)
-                .finish()?;
-
-            // Show schema for each stdin table (they all share the same structure)
-            for (table_name, _) in stdin_tables {
-                println!("Table: {}", table_name);
-                println!("Columns:");
-                for (name, dtype) in df.schema().iter() {
-                    let type_str = polars_to_sqlite_type(dtype);
-                    println!("  {} ({})", name, type_str);
-                }
-                println!();
+    // Add a check if no tables were found in the DB but files/stdin were specified,
+    // it might indicate an issue or that they were not loadable (e.g. all non-DB/CSV files)
+    if !tables_shown && (!files.is_empty() || !stdin_tables.is_empty()) {
+        let mut has_potentially_loadable_inputs = false;
+        for file in files {
+            let ext = file.extension().unwrap_or_default();
+            if ext == "csv" || ext == "sqlite" || ext == "db" {
+                has_potentially_loadable_inputs = true;
+                break;
             }
-        } else {
-            println!("Warning: Could not read data from stdin");
+        }
+        if !stdin_tables.is_empty() {
+            has_potentially_loadable_inputs = true;
         }
 
-        println!("Note: Full stdin data will be processed when query is executed.");
-    } else if !stdin_tables.is_empty() {
-        // Stdin tables were specified but no data is available
-        println!("Warning: stdin tables specified, but no data available from stdin");
+        if has_potentially_loadable_inputs {
+            println!("No tables found in the database. This might be due to errors during data loading or unsupported file types.");
+        } else if !files.is_empty() {
+            println!("No tables found in the database. The input files might not be supported types (CSV, SQLite).");
+        } else {
+             // This case (no tables shown, no files, no stdin_tables) should ideally not be hit
+             // if `table_names.is_empty()` check at the beginning handles it.
+             // If it is hit, it means table_names was not empty, but tables_shown remained false.
+             // This implies an issue with iterating tables or PRAGMA.
+        }
+    } else if !tables_shown && files.is_empty() && stdin_tables.is_empty() {
+        // This means `table_names.is_empty()` was true earlier and printed "No tables found..."
+        // So no further message is needed here.
     }
+
 
     Ok(())
 }
 
+
 fn run_query(
+    conn: &Connection,
     query: &str,
-    files: &[PathBuf],
-    stdin_tables: &[(String, String)],
     format: &str,
     show_sql: bool,
 ) -> Result<(), Box<dyn Error>> {
@@ -271,43 +324,7 @@ fn run_query(
         return Ok(());
     }
 
-    let conn = Connection::open_in_memory()?;
-
-    // Load regular files
-    for file in files {
-        let table_name = file.file_stem().unwrap().to_string_lossy();
-
-        if file
-            .extension()
-            .map(|e| e == "sqlite" || e == "db")
-            .unwrap_or(false)
-        {
-            conn.execute(
-                &format!("ATTACH DATABASE '{}' AS '{}'", file.display(), table_name),
-                [],
-            )?;
-        } else {
-            load_csv_with_polars(&conn, &table_name.to_string(), file)?;
-        }
-    }
-
-    // Load stdin data if needed
-    if !stdin_tables.is_empty() && atty::isnt(atty::Stream::Stdin) {
-        // Read stdin data once into memory
-        let mut stdin_data = Vec::new();
-        io::stdin().read_to_end(&mut stdin_data)?;
-
-        if stdin_data.is_empty() {
-            return Err("Stdin tables specified, but no data received from stdin".into());
-        }
-
-        // Create each requested table from the same stdin data
-        for (table_name, _) in stdin_tables {
-            load_csv_from_memory_with_polars(&conn, table_name, &stdin_data)?;
-        }
-    } else if !stdin_tables.is_empty() {
-        return Err("Stdin tables specified, but no data available from stdin".into());
-    }
+    // Connection is now passed in, data loading is separate
 
     // Execute the query and format results
     let mut stmt = conn.prepare(&sql)?;
@@ -402,6 +419,14 @@ fn run_query(
     Ok(())
 }
 
+fn save_database(source_conn: &Connection, output_path: &PathBuf) -> Result<(), Box<dyn Error>> {
+    let mut dest_conn = Connection::open(output_path)?;
+    let backup = backup::Backup::new(source_conn, &mut dest_conn)?;
+    backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
+    eprintln!("Database saved to {}", output_path.display()); // Inform user
+    Ok(())
+}
+
 fn compile_prql(query: &str) -> Result<String, Box<dyn Error>> {
     if query.ends_with(".prql") && std::path::Path::new(query).exists() {
         let prql = fs::read_to_string(query)?;
@@ -471,6 +496,85 @@ fn convert_any_value_to_sql(value: AnyValue) -> Box<dyn ToSql> {
 }
 
 // New function to load CSV using Polars with type inference
+fn load_all_data(
+    conn: &Connection,
+    regular_files: &[PathBuf],
+    stdin_tables: &[(String, String)],
+) -> Result<(), Box<dyn Error>> {
+    // Load regular files
+    for file in regular_files {
+        let table_name = file.file_stem().unwrap().to_string_lossy();
+
+        if file
+            .extension()
+            .map(|e| e == "sqlite" || e == "db")
+            .unwrap_or(false)
+        {
+            conn.execute(
+                &format!("ATTACH DATABASE '{}' AS '{}'", file.display(), table_name),
+                [],
+            )?;
+        } else {
+            load_csv_with_polars(conn, &table_name.to_string(), file)?;
+        }
+    }
+
+    // Load stdin data if needed
+    if !stdin_tables.is_empty() { // Simpler check, actual data read happens next
+        // Read stdin data once into memory only if there are stdin tables
+        let mut stdin_data = Vec::new();
+        // Only read if stdin is not a tty
+        if atty::isnt(atty::Stream::Stdin) {
+            io::stdin().read_to_end(&mut stdin_data)?;
+        }
+        
+        if stdin_data.is_empty() && atty::isnt(atty::Stream::Stdin) {
+             // This case means stdin was expected but was empty.
+             // If stdin is a TTY, it's fine, it means no data was piped.
+            return Err("Stdin tables specified, but no data received from stdin".into());
+        }
+
+
+        // Create each requested table from the same stdin data, if data was read
+        if !stdin_data.is_empty() {
+            for (table_name, _) in stdin_tables {
+                load_csv_from_memory_with_polars(conn, table_name, &stdin_data)?;
+            }
+        } else if !stdin_tables.is_empty() && !atty::is(atty::Stream::Stdin) {
+            // If stdin tables were specified, but stdin is a TTY and no data was piped,
+            // it's not an error, but tables won't be loaded.
+            // Or, if stdin was not a TTY but read_to_end somehow resulted in empty (e.g. Ctrl+D immediately).
+            // This path implies stdin_tables is not empty, but stdin_data is.
+            // Consider if this should be a warning or an error.
+            // The original code errored if stdin_tables was non-empty but stdin was a TTY.
+            // Let's stick to erroring if stdin tables are expected but not provided.
+            // The check `atty::isnt(atty::Stream::Stdin)` handles the TTY case for reading.
+            // If `stdin_data` is empty AND `stdin_tables` is not, it's an issue.
+            // However, the `process_file_arguments` already tries to intelligently add stdin
+            // only if it's not a TTY.
+            // The crucial part is `stdin_data.is_empty()` after attempting a read.
+            // If `stdin_tables` is populated, it means we expect data.
+            // The logic in `process_file_arguments` for peeking might need adjustment
+            // if it consumes the first byte, making `stdin_data` appear empty later.
+            // For now, let's assume `read_to_end` gets everything if not a TTY.
+            // If stdin_tables is not empty, and we are here, it means stdin was expected.
+            // If stdin_data is empty, it's an error.
+            // The `atty::isnt(atty::Stream::Stdin)` check before read should prevent reading from TTY.
+            // If stdin_tables is not empty, and stdin is TTY, then `process_file_arguments`
+            // should ideally not have added them, or `load_all_data` should not try to read.
+            // The current logic: if stdin_tables is not empty, attempt read if not TTY.
+            // If after that, data is empty, it's an error.
+            // If stdin_tables is not empty and it IS a TTY, `stdin_data` will be empty.
+            // This should be an error as per original logic.
+             if atty::is(atty::Stream::Stdin) {
+                return Err("Stdin tables specified, but stdin is a TTY. Pipe data to stdin.".into());
+            }
+            // If it wasn't a TTY but data is empty, it's also an error. (covered by the earlier check)
+        }
+    }
+    Ok(())
+}
+
 fn load_csv_with_polars(
     conn: &Connection,
     table_name: &str,
