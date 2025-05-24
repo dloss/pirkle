@@ -38,9 +38,9 @@ $ cargo install pirkle
 Or install using [Rust](https://rustup.rs/):
 
 ```bash
-git clone https://github.com/dloss/pirkle.git
-cd pirkle
-cargo install --path .
+$ git clone https://github.com/dloss/pirkle.git
+$ cd pirkle
+$ cargo install --path .
 ```
 
 
