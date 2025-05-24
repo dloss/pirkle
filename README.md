@@ -3,12 +3,32 @@
 [![CI](https://github.com/dloss/pirkle/actions/workflows/release.yml/badge.svg)](https://github.com/dloss/pirkle/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](/LICENSE)
 
-
 # Pirkle — Query CSV and SQLite with PRQL
 
-Pirkle is a command-line tool to query CSV and SQLite files using the [PRQL](https://prql-lang.org/) language.
+Pirkle is a fast, lightweight command-line tool that brings the power of [PRQL](https://prql-lang.org/) (Pipelined Relational Query Language) to CSV and SQLite files. Transform, filter, and join your data with expressive, readable queries that compile to optimized SQL.
 
-It loads CSV files into an in-memory SQLite database — allowing you to join them with other tables, apply filters, and export results in table or CSV format.
+**Why Pirkle?**
+- 🚀 **Fast**: Built in Rust with optimized SQLite backend
+- 📊 **Flexible**: Query CSV files as if they were database tables
+- 🔗 **Powerful**: Join multiple files and data sources
+- 📝 **Readable**: PRQL's pipeline syntax is intuitive and maintainable
+- 🎯 **Versatile**: Multiple output formats (table, CSV, JSON, logfmt)
+
+## Table of Contents
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+  - [Basic Queries](#basic-queries)
+  - [Reading from Standard Input](#reading-from-standard-input)
+  - [Output Formats](#output-formats)
+  - [Advanced Features](#advanced-features)
+- [Common Use Cases](#common-use-cases)
+- [Performance Tips](#performance-tips)
+- [Troubleshooting](#troubleshooting)
+- [Requirements](#requirements)
+- [Example Data](#example-data)
+- [License](#license)
 
 ## Features
 
@@ -20,29 +40,51 @@ It loads CSV files into an in-memory SQLite database — allowing you to join th
 - View schema information for files
 - Lightweight, fast, and written in Rust
 
-
 ## Installation
 
-### Prebuilt binaries
+### Prebuilt Binaries
 
-Prebuilt binaries are available on the [Releases page](https://github.com/dloss/pirkle/releases).
+Download the latest release for your platform:
 
-### From crates.io
+| Platform | Download |
+|----------|----------|
+| Windows | [pirkle-x86_64-pc-windows-msvc.zip](https://github.com/dloss/pirkle/releases/latest) |
+| macOS (Apple Silicon) | [pirkle-aarch64-apple-darwin.tar.gz](https://github.com/dloss/pirkle/releases/latest) |
+| macOS (Intel) | [pirkle-x86_64-apple-darwin.tar.gz](https://github.com/dloss/pirkle/releases/latest) |
+| Linux (x86_64) | [pirkle-x86_64-unknown-linux-musl.tar.gz](https://github.com/dloss/pirkle/releases/latest) |
+
+### Package Managers
 
 ```bash
-$ cargo install pirkle
+# Cargo (Rust)
+cargo install pirkle
+
+# Homebrew (coming soon)
+# brew install pirkle
 ```
 
 ### From Source
 
-Or install using [Rust](https://rustup.rs/):
+Install using [Rust](https://rustup.rs/):
 
 ```bash
-$ git clone https://github.com/dloss/pirkle.git
-$ cd pirkle
-$ cargo install --path .
+git clone https://github.com/dloss/pirkle.git
+cd pirkle
+cargo install --path .
 ```
 
+## Quick Start
+
+```bash
+# Install pirkle
+cargo install pirkle
+
+# Query a CSV file
+pirkle examples/data.csv --query "from data | filter price > 100 | select {name, price}"
+
+# View file structure
+pirkle examples/data.csv --schema
+```
 
 ## Usage
 
@@ -59,15 +101,15 @@ James Brown     39
 ```
 
 ```bash
-# Query a SQLite file (after generating with examples/make_sqlite.sh)
-$ pirkle examples/company.sqlite --query "from employees | select {name, age}"
-name     age  
---------------
-Alice    30   
-Bob      45   
-Charlie  25   
-Diana    35   
-Eva      28   
+# Query a SQLite file
+$ pirkle examples/company.sqlite --query "from employees | select {name, age} | take 5"
+name            age  
+---------------------
+John Smith      32   
+Maria Garcia    28   
+Robert Johnson  41   
+Lisa Wang       35   
+Ahmed Hassan    29   
 ```
 
 ```bash
@@ -88,12 +130,58 @@ Pirkle supports reading CSV data from standard input, making it easy to pipe dat
 ```bash
 # Pipe data into pirkle
 $ cat examples/employees.csv | pirkle stdin --query "from stdin | filter salary > 70000"
+id  name             department   age  salary  country      
+------------------------------------------------------------
+1   John Smith       Engineering  32   85000   USA          
+3   Robert Johnson   Engineering  41   92000   USA          
+5   Ahmed Hassan     Engineering  29   75000   Egypt        
+8   Sarah Kim        Engineering  31   83000   South Korea  
+9   James Brown      Sales        39   85000   USA          
+10  Fatima Al-Farsi  Marketing    36   76000   UAE
 
 # Use stdin with files
 $ cat examples/orders.csv | pirkle stdin examples/customers.csv --query "from stdin | join customers (==customer_id)"
+order_id  customer_id  amount  region  customer_id  name              region  
+------------------------------------------------------------------------------
+1         100          250     North   100          Acme Corp         North   
+2         101          300     South   101          Globex Inc        South   
+3         100          150     North   100          Acme Corp         North   
+4         102          400     West    102          Initech           West    
+5         103          200     East    103          Stark Industries  East
 
 # Custom table name for stdin data
 $ cat examples/employees.csv | pirkle stdin:workers --query "from workers | sort {-salary}"
+id  name              department   age  salary  country      
+-------------------------------------------------------------
+3   Robert Johnson    Engineering  41   92000   USA          
+1   John Smith        Engineering  32   85000   USA          
+9   James Brown       Sales        39   85000   USA          
+8   Sarah Kim         Engineering  31   83000   South Korea  
+10  Fatima Al-Farsi   Marketing    36   76000   UAE          
+5   Ahmed Hassan      Engineering  29   75000   Egypt        
+4   Lisa Wang         Marketing    35   70000   China        
+7   Carlos Rodriguez  Marketing    33   68000   Spain        
+2   Maria Garcia      Sales        28   65000   Mexico       
+6   Emma Wilson       Sales        27   62000   UK
+```
+
+#### Pipeline Integration
+
+Pirkle integrates seamlessly with Unix pipelines:
+
+```bash
+# From curl/API responses
+curl -s api.example.com/data.csv | pirkle stdin --query "from stdin | filter active == true"
+
+# From other command output
+cat *.csv | pirkle stdin --query "from stdin | group category (aggregate {count = count this})"
+
+# Complex pipeline
+grep "ERROR" logs.csv | pirkle stdin --query "
+from stdin 
+| derive hour = (timestamp | date.truncate hour)
+| group hour (aggregate {error_count = count this})
+| sort hour"
 ```
 
 ##### Key features:
@@ -111,7 +199,6 @@ $ cat examples/employees.csv | pirkle stdin:workers --query "from workers | sort
   ```
 
 Pirkle intelligently determines how to use stdin based on your command arguments, making it a flexible tool for data pipelines.
-
 
 ### Viewing Schema Information
 
@@ -159,8 +246,14 @@ GROUP BY
 -- Generated by PRQL compiler version:0.12.2 (https://prql-lang.org)
 ```
 
+### Output Formats
 
-### Output formats
+| Format | Use Case | Example |
+|--------|----------|---------|
+| `table` | Human-readable terminal output | Data exploration |
+| `csv` | Spreadsheet import, further processing | `pirkle data.csv --format csv > result.csv` |
+| `jsonl` | API integration, log analysis | `pirkle logs.csv --format jsonl \| jq '.'` |
+| `logfmt` | Structured logging, monitoring | Integration with log aggregators |
 
 Default is a readable table format.
 
@@ -194,7 +287,6 @@ id="3" name="Robert Johnson" department="Engineering" age="41" salary="92000" co
 id="9" name="James Brown" department="Sales" age="39" salary="85000" country="USA"
 ```
 
-
 ### Using PRQL files
 
 You can use prewritten PRQL query files:
@@ -210,7 +302,6 @@ James Brown           Sales         85000
 Sarah Kim             Engineering   83000
 Fatima Al-Farsi       Marketing     76000
 ```
-
 
 ### Joining tables
 
@@ -229,6 +320,108 @@ order_id   name            amount
 5          Stark Industries 200
 ```
 
+## Common Use Cases
+
+### Data Analysis
+```bash
+# Find average salary and employee count by department
+pirkle employees.csv --query "
+from employees 
+| group department (aggregate {
+    avg_salary = average salary, 
+    count = count this
+  })
+| sort -avg_salary
+| take 5"
+```
+
+### Data Cleaning
+```bash
+# Remove duplicates and filter valid records
+pirkle messy_data.csv --query "
+from messy_data
+| filter email != null
+| group email (take 1)
+| select {name, email, phone}"
+```
+
+### Joining Data Sources
+```bash
+# Combine sales data with customer information
+pirkle sales.csv customers.csv --query "
+from sales
+| join customers (==customer_id)
+| group customers.region (aggregate {total_sales = sum sales.amount})
+| sort -total_sales"
+```
+
+### Time Series Analysis
+```bash
+# Analyze daily sales trends
+pirkle transactions.csv --query "
+from transactions
+| derive date = (timestamp | date.truncate day)
+| group date (aggregate {
+    daily_sales = sum amount,
+    transaction_count = count this
+  })
+| sort date"
+```
+
+### Data Exploration
+```bash
+# Quick summary statistics
+pirkle dataset.csv --query "
+from dataset
+| aggregate {
+    min_value = min price,
+    max_value = max price,
+    avg_value = average price,
+    total_records = count this
+  }"
+```
+
+## Performance Tips
+
+- **Schema inference**: Pirkle automatically detects column types for optimal performance
+- **Memory usage**: Large CSV files are streamed efficiently through SQLite
+- **Query optimization**: PRQL compiles to optimized SQL - complex queries often perform better than you'd expect
+- **File formats**: SQLite files are queried directly without loading into memory
+- **Early filtering**: For large datasets, filter early in your pipeline to reduce processing overhead
+
+## Troubleshooting
+
+### Common Issues
+
+**File not found errors**
+```bash
+# Ensure file paths are correct
+pirkle ./data/employees.csv --schema
+```
+
+**Query syntax errors**
+```bash
+# Use --show-sql to debug generated SQL
+pirkle data.csv --query "your query here" --show-sql
+```
+
+**Large file performance**
+```bash
+# For very large files, consider filtering early in the pipeline
+pirkle large_file.csv --query "from large_file | filter date > @2024-01-01 | ..."
+```
+
+**Memory issues with large datasets**
+```bash
+# Process data in chunks or use more specific filters
+pirkle huge_file.csv --query "from huge_file | filter region == 'US' | take 1000"
+```
+
+## Requirements
+
+- **PRQL Version**: 0.12.2
+- **Supported Platforms**: Linux, macOS, Windows
+- **Rust Version**: 1.70+ (for building from source)
 
 ## Example Data
 
@@ -238,7 +431,6 @@ Included example files:
 - `examples/departments.csv`: Department names and IDs
 - `examples/customers.csv`, `examples/orders.csv`: Customer-order relationship data
 - `examples/queries/*.prql`: Sample PRQL queries
-
 
 ## License
 
