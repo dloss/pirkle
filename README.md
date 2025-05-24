@@ -27,17 +27,6 @@ It loads CSV files into an in-memory SQLite database — allowing you to join th
 
 Prebuilt binaries are available on the [Releases page](https://github.com/dloss/pirkle/releases).
 
-The macOS binaries are code-signed and notarized with Apple, but as a command-line tool, you may still need to:
-
-1. Right-click the executable and choose "Open" the first time you run it
-
-   OR
-
-2. Remove the quarantine attribute via Terminal:
-   ```bash
-   xattr -d com.apple.quarantine /path/to/pirkle
-   ```
-
 ### From crates.io
 
 ```bash
