@@ -1,4 +1,4 @@
 from employees
-sort -salary
+sort {-salary}
 select {name, department, salary}
 take 5

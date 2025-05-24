@@ -1,0 +1,11 @@
+from employees
+filter department == "Engineering"
+derive {
+  experience_level = case [
+    age < 30 => "Junior",
+    age < 40 => "Mid-level", 
+    true => "Senior"
+  ]
+}
+select {name, age, experience_level, salary}
+sort {-salary}

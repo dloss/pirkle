@@ -1,0 +1,6 @@
+from employees  
+group country (aggregate {
+  total_employees = count this,
+  avg_salary = average salary
+})
+sort {-total_employees}

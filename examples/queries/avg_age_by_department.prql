@@ -1,2 +1,2 @@
 from employees
-group department_id (aggregate {avg_age = average age})
+group department (aggregate {avg_age = average age})

@@ -1,0 +1,8 @@
+from employees
+group department (aggregate {
+  avg_salary = average salary,
+  min_salary = min salary,
+  max_salary = max salary,
+  count = count this
+})
+sort {-avg_salary}
