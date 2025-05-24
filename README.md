@@ -417,12 +417,6 @@ pirkle large_file.csv --query "from large_file | filter date > @2024-01-01 | ...
 pirkle huge_file.csv --query "from huge_file | filter region == 'US' | take 1000"
 ```
 
-## Requirements
-
-- **PRQL Version**: 0.12.2
-- **Supported Platforms**: Linux, macOS, Windows
-- **Rust Version**: 1.70+ (for building from source)
-
 ## Example Data
 
 Included example files:
